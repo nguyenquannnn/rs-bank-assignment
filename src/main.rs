@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::env;
 use std::io;
 use std::{collections::HashMap, error::Error, ffi::OsString};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Copy, Clone, Deserialize)]
 enum TransactionType {
     Deposit,
     Withdrawal,
@@ -12,6 +13,7 @@ enum TransactionType {
     Chargeback,
 }
 
+#[derive(PartialEq)]
 enum TransactionStatus {
     Processed,
     Disputed,
@@ -19,8 +21,8 @@ enum TransactionStatus {
 
 type TransactionRecord = (Transaction, TransactionStatus);
 struct Bank {
-    accounts: Vec<Account>,
-    transactions: HashMap<u32, TransactionRecord>,
+    accounts: RefCell<Vec<Account>>,
+    transactions: RefCell<HashMap<u32, TransactionRecord>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,7 +45,7 @@ impl Account {
         }
     }
 }
-
+#[derive(Debug, Deserialize)]
 struct Transaction {
     tx_type: TransactionType,
     client_id: u32,
@@ -57,33 +59,34 @@ struct Transaction {
 impl Bank {
     fn new() -> Self {
         Self {
-            accounts: Vec::new(),
-            transactions: HashMap::new(),
+            accounts: RefCell::new(Vec::new()),
+            transactions: RefCell::new(HashMap::new()),
         }
     }
-    fn batch_process(self: &Self, batch_tx: &Vec<Transaction>) -> Result<(), String> {
+    fn batch_process(&self, batch_tx: Vec<Transaction>) -> Result<(), String> {
         for tx in batch_tx {
-            if let Err(e) = self.process_transaction(*tx) {
+            if let Err(e) = self.process_transaction(tx) {
                 return Err(e);
             }
         }
         Ok(())
     }
-    fn process_transaction(self: &Self, tx: Transaction) -> Result<(), String> {
-        let account = self.get_account(tx.client_id);
+    fn process_transaction(&self, tx: Transaction) -> Result<(), String> {
+        let mut account = self.get_account(tx.client_id);
         let tx_id = tx.id;
 
         match tx.tx_type {
-            Deposit => {
+            TransactionType::Deposit => {
                 let to_deposit = tx.amount.ok_or("Invalid transaction data")?;
                 account.available += to_deposit;
                 account.total += to_deposit;
                 self.transactions
+                    .borrow_mut()
                     .insert(tx_id, (tx, TransactionStatus::Processed));
 
                 Ok(())
             }
-            Withdrawal => {
+            TransactionType::Withdrawal => {
                 let to_withdraw = tx.amount.ok_or("Invalid transaction data")?;
 
                 if to_withdraw > account.available {
@@ -93,81 +96,97 @@ impl Bank {
                 account.available -= to_withdraw;
                 account.total -= to_withdraw;
                 self.transactions
+                    .borrow_mut()
                     .insert(tx_id, (tx, TransactionStatus::Processed));
 
                 Ok(())
             }
-            Dispute => {
-                let target_tx = self.get_transaction(account, &tx_id, TransactionStatus::Processed);
+            TransactionType::Dispute => {
+                let target_tx =
+                    self.get_transaction(&account, &tx_id, TransactionStatus::Processed);
 
                 match target_tx {
-                    Ok(target_tx) => {
+                    Ok(mut target_tx) => {
                         account.held += target_tx.0.amount.expect("Invalid transaction data");
                         account.available -= target_tx.0.amount.expect("Invalid transaction data");
                         target_tx.1 = TransactionStatus::Disputed;
                         Ok(())
                     }
-                    Err(e) => Ok(()),
+                    Err(_) => Ok(()),
                 }
             }
-            Resolve => {
-                let target_tx = self.get_transaction(account, &tx_id, TransactionStatus::Disputed);
+            TransactionType::Resolve => {
+                let target_tx = self.get_transaction(&account, &tx_id, TransactionStatus::Disputed);
 
                 match target_tx {
-                    Ok(target_tx) => {
+                    Ok(mut target_tx) => {
                         account.held -= target_tx.0.amount.expect("Invalid transaction data");
                         account.available += target_tx.0.amount.expect("Invalid transaction data");
                         target_tx.1 = TransactionStatus::Processed;
                         Ok(())
                     }
-                    Err(e) => Ok(()),
+                    Err(_) => Ok(()),
                 }
             }
-            Chargeback => {
-                let target_tx = self.get_transaction(account, &tx_id, TransactionStatus::Disputed);
+            TransactionType::Chargeback => {
+                let target_tx = self.get_transaction(&account, &tx_id, TransactionStatus::Disputed);
 
                 match target_tx {
-                    Ok(target_tx) => {
+                    Ok(mut target_tx) => {
                         account.held -= target_tx.0.amount.expect("Invalid transaction data");
                         account.total -= target_tx.0.amount.expect("Invalid transaction data");
                         account.locked = true;
                         target_tx.1 = TransactionStatus::Processed;
                         Ok(())
                     }
-                    Err(e) => Ok(()),
+                    Err(_) => Ok(()),
                 }
             }
         }
     }
     fn get_transaction(
-        self: &Self,
-        account: &mut Account,
+        &self,
+        account: &Account,
         tx_id: &u32,
         desired_status: TransactionStatus,
-    ) -> Result<&TransactionRecord, String> {
-        let target_tx = self.transactions.get(&tx_id);
-        if let Some(target_tx) = target_tx {
-            if let desired_status = target_tx.1 {
-                Ok(target_tx)
-            } else {
+    ) -> Result<TransactionRecord, String> {
+        if let Some(target_tx) = self.transactions.borrow_mut().remove(&tx_id) {
+            if target_tx.0.client_id != account.client_id {
+                return Err(format!(
+                    "Transaction #{} does not have matching client id",
+                    tx_id
+                ));
+            }
+            if desired_status == target_tx.1 {
                 return Err(format!("Transaction #{} not in desired state", tx_id));
             }
+            return Ok(target_tx);
         } else {
             return Err(format!("Transaction #{} not found", tx_id));
         }
     }
-    fn get_account(self: &Self, client_id: u32) -> &mut Account {
-        if let Some(account) = self.accounts.iter_mut().find(|x| x.client_id == client_id) {
-            return account;
-        } else {
-            let new_account = Account::new(client_id);
-            self.accounts.push(new_account);
-            return &mut new_account;
+
+    fn get_account(&self, client_id: u32) -> Account {
+        match self
+            .accounts
+            .borrow()
+            .iter()
+            .position(|x| x.client_id == client_id)
+        {
+            Some(index) => self.accounts.borrow_mut().remove(index),
+            // None => todo!(),
+            // Some(_) => todo!(),
+            None => {
+                let new_account = Account::new(client_id);
+                self.accounts.borrow_mut().push(new_account);
+                return self.accounts.borrow_mut().pop().unwrap();
+            }
         }
     }
-    fn print_report(self: &Self) -> Result<(), Box<dyn Error>> {
+
+    fn print_report(&self) -> Result<(), Box<dyn Error>> {
         let mut writer = csv::Writer::from_writer(io::stdout());
-        for account in self.accounts {
+        for account in self.accounts.borrow().iter() {
             writer.serialize(account)?;
         }
         writer.flush()?;
@@ -181,7 +200,7 @@ fn main() {
             let transactions = parse_transactions(file_path).unwrap();
 
             let bank = Bank::new();
-            if let Err(e) = bank.batch_process(&transactions) {
+            if let Err(e) = bank.batch_process(transactions) {
                 eprintln!("{}", e);
                 return;
             }
