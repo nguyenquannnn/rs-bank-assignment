@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'rs-bank-assignment'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rs-bank-assignment",
+                    "--package=rs-bank-assignment"
+                ],
+                "filter": {
+                    "name": "rs-bank-assignment",
+                    "kind": "bin"
+                }
+            },
+            "args": ["transactions.csv"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'rs-bank-assignment'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=rs-bank-assignment",
+                    "--package=rs-bank-assignment"
+                ],
+                "filter": {
+                    "name": "rs-bank-assignment",
+                    "kind": "bin"
+                }
+            },
+            "args": ["test_batch_process_dispute"],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
