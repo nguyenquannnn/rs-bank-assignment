@@ -37,6 +37,7 @@ type TransactionRecord = (Transaction, TransactionStatus);
 
 #[derive(Debug, Serialize)]
 struct Account {
+    #[serde(rename(serialize = "client"))]
     client_id: u16,
     available: f32,
     held: f32,
